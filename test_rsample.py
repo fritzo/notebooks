@@ -63,7 +63,7 @@ class PoissonGamma(object):
 
     def test(self):
         pyro.clear_param_store()
-        pyro.util.set_rng_seed(0)
+        pyro.util.set_rng_seed(1)
         print("*** poisson gamma ***   [reparameterized = %s]" % self.use_rep)
 
         def model():
@@ -73,8 +73,7 @@ class PoissonGamma(object):
             return lambda_latent
 
         def guide():
-            alpha_q_log = pyro.param(
-                "alpha_q_log",
+            alpha_q_log = pyro.param("alpha_q_log",
                 Variable(self.log_alpha_n.data + noise(), requires_grad=True))
             beta_q_log = pyro.param("beta_q_log",
                 Variable(self.log_beta_n.data - noise(), requires_grad=True))
@@ -85,16 +84,16 @@ class PoissonGamma(object):
                 pyro.sample("lambda_latent", NonRepGamma(alpha_q, beta_q))
 
         if self.use_rep:
-            adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
+            adam = optim.Adam({"lr": .0005, "betas": (0.95, 0.999)})
         else:
             adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
         svi = SVI(model, guide, adam, loss="ELBO", trace_graph=False)
 
         print("        log_alpha log_beta   mean_error  var_error")
-        for k in range(9001):
+        for k in range(15001):
             svi.step()
 
-            if k%250==0:
+            if k%500==0:
                 alpha_error = param_abs_error("alpha_q_log", self.log_alpha_n)
                 beta_error = param_abs_error("beta_q_log", self.log_beta_n)
                 mean_error = gamma_mean_error("alpha_q_log", "beta_q_log",
@@ -113,8 +112,7 @@ class ExponentialGamma(object):
         self.beta0 = Variable(torch.Tensor([1.0]))
         self.data = Variable(torch.Tensor([[2.0],[3.0]]))
         self.n_data = self.data.size(0)
-        self.alpha_n = self.alpha0 + \
-            Variable(torch.Tensor([self.n_data]))  # posterior alpha
+        self.alpha_n = self.alpha0 + Variable(torch.Tensor([self.n_data]))  # posterior alpha
         self.beta_n = self.beta0 + torch.sum(self.data)  # posterior beta
         self.log_alpha_n = torch.log(self.alpha_n)
         self.log_beta_n = torch.log(self.beta_n)
@@ -122,7 +120,7 @@ class ExponentialGamma(object):
 
     def test(self):
         pyro.clear_param_store()
-        pyro.util.set_rng_seed(1)
+        pyro.util.set_rng_seed(5)
         print("*** exponential gamma ***   [reparameterized = %s]" % self.use_rep)
         print("        log_alpha log_beta   mean_error  var_error")
 
@@ -144,12 +142,12 @@ class ExponentialGamma(object):
                 pyro.sample("lambda_latent", NonRepGamma(alpha_q, beta_q))
 
         if self.use_rep:
-            adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
+            adam = optim.Adam({"lr": .0005, "betas": (0.95, 0.999)})
         else:
             adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
         svi = SVI(model, guide, adam, loss="ELBO", trace_graph=False)
 
-        for k in range(9001):
+        for k in range(15001):
             svi.step()
 
             if k % 500==0:
@@ -200,10 +198,13 @@ class BernoulliBeta(object):
             else:
                 pyro.sample("p_latent", NonRepBeta(alpha_q, beta_q))
 
-        adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
+        if self.use_rep:
+            adam = optim.Adam({"lr": .0005, "betas": (0.95, 0.999)})
+        else:
+            adam = optim.Adam({"lr": .0005, "betas": (0.97, 0.999)})
         svi = SVI(model, guide, adam, loss="ELBO", trace_graph=False)
 
-        for k in range(9001):
+        for k in range(15001):
             svi.step()
 
             if k%500==0:
