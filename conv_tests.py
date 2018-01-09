@@ -15,6 +15,10 @@ from pyro.infer.svi import SVI
 from pyro.util import ng_ones, ng_zeros
 from pyro.distributions.gamma import Gamma as NonRepGamma
 from pyro.distributions.beta import Beta as NonRepBeta
+from pyro.distributions.dirichlet import Dirichlet as NonRepDirichlet
+
+import sys
+
 
 def param_mse(name, target):
     return torch.sum(torch.pow(target - pyro.param(name), 2.0)).data.cpu().numpy()[0]
@@ -49,17 +53,14 @@ def noise(eps=0.6):
     return eps*torch.randn(1)
 
 class PoissonGamma(object):
-    def __init__(self, alpha0=1.0):
+    def __init__(self, alpha0=1.0, n_data=50):
         # poisson-gamma model
         # gamma prior hyperparameter
         self.alpha0 = Variable(torch.Tensor([alpha0]))
         # gamma prior hyperparameter
         self.beta0 = Variable(torch.Tensor([1.0]))
+        self.n_data = n_data
         self.data = self.model().unsqueeze(1)
-        #self.data = Variable(torch.Tensor([[1.0],[2.0],[3.0],
-        #                                   [8.0],[1.0],[2.0],
-        #                                   [5.0],[4.0],[4.0]]))
-        self.n_data = self.data.size(0)
         self.alpha_n = self.alpha0 + self.data.sum()  # posterior alpha
         self.beta_n = self.beta0 + \
             Variable(torch.Tensor([self.n_data]))  # posterior beta
@@ -70,7 +71,7 @@ class PoissonGamma(object):
         lambda_latent = pyro.sample("lambda_latent", dist.gamma, self.alpha0, self.beta0)
         with pyro.iarange('observe_data'):
             if obs is None:
-                return pyro.observe('obs', dist.poisson, obs, lambda_latent.expand(50))
+                return pyro.observe('obs', dist.poisson, obs, lambda_latent.expand(self.n_data))
             pyro.observe('obs', dist.poisson, obs, lambda_latent)
 
     def test(self, use_rep=False, lr=0.001, beta1=0.90, beta2=0.999,
@@ -227,31 +228,91 @@ class BernoulliBeta(object):
                 print("[%04d]: %.4f    %.4f     %.4f      %.4f" % (k, alpha_error, beta_error,
                                                                    mean_error, var_error))
 
+class MultinomialDirichlet(object):
+    def __init__(self, use_rep=True, N=8, noise=4.0):
+        self.N = N
+        No2 = int(N/2)
+        self.alpha0 = Variable(torch.Tensor(2**np.arange(N) / (2**No2)))
+        self.data = Variable(torch.Tensor(20*np.random.randint(0,N,N)))
+        self.data[0]=0.0
+        self.data[-1]=0.0
+        #self.data = Variable(torch.Tensor(np.random.randint(0,N,N)).unsqueeze(1))
+        self.n_data = self.data.size(0)
+        self.alpha_n = self.alpha0 + self.data#.squeeze()
+        self.log_alpha_n = torch.log(self.alpha_n)
+        self.use_rep=use_rep
+        self.noise=noise
+
+    def test(self):
+        pyro.clear_param_store()
+        pyro.util.set_rng_seed(1)
+        print("*** multinomial dirichlet ***   [reparameterized = %s]" % self.use_rep)
+        print("alpha0: ", self.alpha0.data.numpy())
+        print("alphap: ", np.exp(self.log_alpha_n.data.numpy()))
+
+        def model():
+            p_latent = pyro.sample("p_latent", dist.dirichlet, self.alpha0)
+            with pyro.iarange('observe_data'):
+                pyro.sample('obs', dist.multinomial, p_latent, 1, obs=self.data)
+
+        def guide():
+            alpha_q_log = pyro.param("alpha_q_log", Variable(self.log_alpha_n.data +
+                                                             self.noise*torch.randn(self.N),
+                                                             requires_grad=True))
+            alpha_q = torch.exp(alpha_q_log)
+            if self.use_rep:
+                pyro.sample("p_latent", dist.dirichlet, alpha_q)
+            else:
+                pyro.sample("p_latent", NonRepDirichlet(alpha_q))
+
+        if self.use_rep:
+            adam = optim.Adam({"lr": .0003, "betas": (0.95, 0.999)})
+        else:
+            adam = optim.Adam({"lr": .0003, "betas": (0.95, 0.999)})
+        svi = SVI(model, guide, adam, loss="ELBO", trace_graph=False)
+
+        for k in range(25001):
+            svi.step()
+
+            if k%500==0:
+                alpha_error = param_abs_error("alpha_q_log", self.log_alpha_n)
+                min_alpha = np.min(pyro.param("alpha_q_log").data.numpy())
+                print("[%04d]: %.4f %.4f" % (k, alpha_error, min_alpha))
+
+
+md = MultinomialDirichlet(use_rep=True, N=3, noise=0.5)
+#md = MultinomialDirichlet(use_rep=False)
+md.test()
+sys.exit()
 
 pg = PoissonGamma()
-lrs = 2**np.arange(2)*0.0001
-results = defaultdict(lambda: defaultdict(lambda: {}))
-models = [(PoissonGamma(alpha0=0.10), "poisson_gamma_0.1"),
-          (PoissonGamma(alpha0=1.00), "poisson_gamma_1.0"),
-          (PoissonGamma(alpha0=100.0), "poisson_gamma_100.0")]
+lrs = 2**np.arange(10)*0.0001
+assert(len(sys.argv)==3)
+alpha0=float(sys.argv[1])
+tag=sys.argv[2]
+print("alpha0: %.4f" % alpha0)
+models = [(PoissonGamma(alpha0=alpha0, n_data=50), "poisson_gamma_%d_n50" % int(100*alpha0)),
+          (PoissonGamma(alpha0=alpha0, n_data=500), "poisson_gamma_%d_n500" % int(100*alpha0))]
+results = {}
 
 for model, name in models:
+    results[name] = {}
     for use_rep in [False, True]:
         repstring = 'Reparam' if use_rep else 'NonRep '
+        results[name][repstring] = {}
         for lr in lrs:
             for beta1 in [0.95]:
                 results[name][repstring][(lr, beta1)] = []
                 print("doing %s %s %f" % (name, repstring, lr))
-                for seed in range(20):
+                for seed in range(10):
                     result = model.test(use_rep=use_rep, lr=lr, beta1=beta1, beta2=0.999,
                              verbose=False, seed=seed, noise_epsilon=1.0,
                              report_frequencies=[1,5000,10000,15000,20000])
                     results[name][repstring][(lr, beta1)].append(result)
-                print(results[name][repstring][(lr, beta1)])
 
 print(results)
-with open("pg_results.pkl", "wb") as output_file:
-    output_file.write(cloudpickle.dumps(results))
+with open("pg_results.%s.pkl" % tag, "wb") as output_file:
+    output_file.write(cloudpickle.dumps(results, protocol=2))
 
 ##with open(filename, "rb") as input_file:
 ##   state = cloudpickle.loads(input_file.read())
