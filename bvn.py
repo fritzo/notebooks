@@ -1,3 +1,12 @@
+import math
+
+import numpy as np
+import torch
+from pyro.distributions import Distribution
+from torch.autograd import Function, Variable
+from torch.autograd.function import once_differentiable
+
+
 class BivariateNormal(Distribution):
     reparameterized = True
 
@@ -39,9 +48,11 @@ class BivariateNormal(Distribution):
     def entropy(self):
         return self.scale_triu.diag().log().sum() + (1 + math.log(2 * math.pi))
 
+
 def _BVN_backward_reptrick(white, scale_triu, grad_output):
     grad = (grad_output.unsqueeze(-1) * white.unsqueeze(-2)).squeeze(0)
     return grad_output, torch.triu(grad.t())
+
 
 class _RepTrickSample(Function):
     @staticmethod
@@ -54,6 +65,7 @@ class _RepTrickSample(Function):
     def backward(ctx, grad_output):
         scale_triu, = ctx.saved_variables
         return _BVN_backward_reptrick(Variable(ctx.white), scale_triu, grad_output)
+
 
 class _CanonicalSample(Function):
     @staticmethod
@@ -75,10 +87,12 @@ class BivariateNormalRepTrick(BivariateNormal):
         loc = self.loc.expand(self.batch_size, *self.loc.size())
         return _RepTrickSample.apply(loc, self.scale_triu)
 
+
 class BivariateNormalCanonical(BivariateNormal):
     def sample(self):
         loc = self.loc.expand(self.batch_size, *self.loc.size())
         return _CanonicalSample.apply(loc, self.scale_triu)
+
 
 def _BVN_backward_canonical(white, scale_triu, grad_output, z):
     g = grad_output
